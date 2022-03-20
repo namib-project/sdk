@@ -87,6 +87,15 @@ class _SecureFilterImpl extends NativeFieldWrapperClass1
       bool requireClientCertificate,
       Uint8List protocols);
 
+  @pragma("vm:external-name", "SecureDatagramSocket_Connect")
+  external void dtlsConnect(
+      String hostName,
+      SecurityContext context,
+      bool isServer,
+      bool requestClientCertificate,
+      bool requireClientCertificate,
+      Uint8List protocols);
+
   void destroy() {
     buffers = null;
     _destroy();

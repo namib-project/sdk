@@ -128,6 +128,35 @@ void FUNCTION_NAME(SecureSocket_Connect)(Dart_NativeArguments args) {
                            require_client_certificate, protocols_handle);
 }
 
+void FUNCTION_NAME(SecureDatagramSocket_Connect)(Dart_NativeArguments args) {
+  Dart_Handle host_name_object = ThrowIfError(Dart_GetNativeArgument(args, 1));
+  Dart_Handle context_object = ThrowIfError(Dart_GetNativeArgument(args, 2));
+  bool is_server = DartUtils::GetBooleanValue(Dart_GetNativeArgument(args, 3));
+  bool request_client_certificate =
+      DartUtils::GetBooleanValue(Dart_GetNativeArgument(args, 4));
+  bool require_client_certificate =
+      DartUtils::GetBooleanValue(Dart_GetNativeArgument(args, 5));
+  Dart_Handle protocols_handle = ThrowIfError(Dart_GetNativeArgument(args, 6));
+
+  const char* host_name = NULL;
+  // TODO(whesse): Is truncating a Dart string containing \0 what we want?
+  ThrowIfError(Dart_StringToCString(host_name_object, &host_name));
+
+  SSLCertContext* context = NULL;
+  if (!Dart_IsNull(context_object)) {
+    ThrowIfError(Dart_GetNativeInstanceField(
+        context_object, SSLCertContext::kSecurityContextNativeFieldIndex,
+        reinterpret_cast<intptr_t*>(&context)));
+  }
+
+  // The protocols_handle is guaranteed to be a valid Uint8List.
+  // It will have the correct length encoding of the protocols array.
+  ASSERT(!Dart_IsNull(protocols_handle));
+  GetFilter(args)->DtlsConnect(host_name, context, is_server,
+                           request_client_certificate,
+                           require_client_certificate, protocols_handle);
+}
+
 void FUNCTION_NAME(SecureSocket_Destroy)(Dart_NativeArguments args) {
   SSLFilter* filter = GetFilter(args);
   // There are two paths that can clean up an SSLFilter object. First,
@@ -477,6 +506,68 @@ void SSLFilter::InitializeLibrary() {
     ASSERT(ssl_cert_context_index >= 0);
     library_initialized_ = true;
   }
+}
+
+void SSLFilter::DtlsConnect(const char* hostname,
+                            SSLCertContext* context,
+                            bool is_server,
+                            bool request_client_certificate,
+                            bool require_client_certificate,
+                            Dart_Handle protocols_handle) {
+  is_server_ = is_server;
+  if (in_handshake_) {
+    FATAL("Connect called twice on the same _SecureFilter.");
+  }
+
+  int status;
+  int error;
+  BIO* ssl_side;
+  status = BIO_new_bio_pair(&ssl_side, kInternalBIOSize, &socket_side_,
+                            kInternalBIOSize);
+
+  SecureSocketUtils::CheckStatusSSL(status, "DtlsException", "BIO_new_bio_pair",
+                                    ssl_);
+
+  ASSERT(context != NULL);
+  ASSERT(context->context() != NULL);
+  ssl_ = SSL_new(context->context());
+  SSL_set_bio(ssl_, ssl_side, ssl_side);
+  SSL_set_mode(ssl_, SSL_MODE_AUTO_RETRY);  // TODO(whesse): Is this right?
+  SSL_set_ex_data(ssl_, filter_ssl_index, this);
+  context->RegisterCallbacks(ssl_);
+  SSL_set_ex_data(ssl_, ssl_cert_context_index, context);
+
+    TrustEvaluateHandlerFunc trust_evaluate_handler =
+      context->GetTrustEvaluateHandler();
+  if (trust_evaluate_handler != nullptr) {
+    trust_evaluate_reply_port_ = Dart_NewNativePort(
+        "SSLCertContextTrustEvaluate", trust_evaluate_handler,
+        /*handle_concurrently=*/false);
+  }
+  if (is_server_) {
+    int certificate_mode =
+        request_client_certificate ? SSL_VERIFY_PEER : SSL_VERIFY_NONE;
+    if (require_client_certificate) {
+      certificate_mode |= SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+    }
+    SSL_set_verify(ssl_, certificate_mode, NULL);
+  } else {
+    SSLCertContext::SetAlpnProtocolList(protocols_handle, ssl_, NULL, false);
+    status = SSL_set_tlsext_host_name(ssl_, hostname);
+    SecureSocketUtils::CheckStatusSSL(status, "TlsException",
+                                      "Set SNI host name", ssl_);
+    // Sets the hostname in the certificate-checking object, so it is checked
+    // against the certificate presented by the server.
+    X509_VERIFY_PARAM* certificate_checking_parameters = SSL_get0_param(ssl_);
+    hostname_ = Utils::StrDup(hostname);
+    X509_VERIFY_PARAM_set_flags(
+        certificate_checking_parameters,
+        X509_V_FLAG_PARTIAL_CHAIN | X509_V_FLAG_TRUSTED_FIRST);
+    X509_VERIFY_PARAM_set_hostflags(certificate_checking_parameters, 0);
+    status = X509_VERIFY_PARAM_set1_host(certificate_checking_parameters,
+                                         hostname_, strlen(hostname_));
+    SecureSocketUtils::CheckStatusSSL(
+        status, "TlsException", "Set hostname for certificate checking", ssl_);
 }
 
 void SSLFilter::Connect(const char* hostname,

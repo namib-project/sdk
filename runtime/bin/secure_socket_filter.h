@@ -80,6 +80,12 @@ class SSLFilter : public ReferenceCounted<SSLFilter> {
                bool request_client_certificate,
                bool require_client_certificate,
                Dart_Handle protocols_handle);
+  void DtlsConnect(const char* hostname,
+                   SSLCertContext* context,
+                   bool is_server,
+                   bool request_client_certificate,
+                   bool require_client_certificate,
+                   Dart_Handle protocols_handle);
   void Destroy();
   void FreeResources();
   void MarkAsTrusted(Dart_NativeArguments args);

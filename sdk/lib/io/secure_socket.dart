@@ -4,6 +4,267 @@
 
 part of dart.io;
 
+
+class DtlsClientConnection extends Stream<Datagram> {
+_SecureFilter? _secureFilter = new _SecureFilter._();
+
+  final _controller = StreamController<Datagram>();
+  final _stream = _controller.stream;
+
+  // Buffer identifiers.
+  // These must agree with those in the native C++ implementation.
+  static const int readPlaintextId = 0;
+  static const int writePlaintextId = 1;
+  static const int readEncryptedId = 2;
+  static const int writeEncryptedId = 3;
+  static const int bufferCount = 4;
+
+  @override
+  StreamSubscription<Datagram> listen(void Function(Datagram event)? onData, {Function? onError, void Function()? onDone, bool? cancelOnError}) {
+    _stream.listen(ondata, {onError: onError, onData: onData, cancelOnError: cancelOnError})
+  }
+
+  int send(List<int> data) {
+    final buffer = _secureFilter!.buffers![readPlaintextId];
+    buffer.write(data, 0, data.length);
+    return 0;
+  }
+}
+
+/// DTLS client connection.
+///
+/// A single [RawDatagramSocket] can be used for multiple connections,
+/// by sending to different endpoints and processing the sender
+/// for each received [Datagram]. A [DtlsClientConnection] can only handle
+/// a single connection.
+///
+/// [incoming] and [outgoing] contain TLS-encrypted data
+/// that should be redirected to a [RawDatagramSocket].
+///
+/// [send] and [received] contain plaintext data
+/// that should be passed to the application logic.
+///
+/// Wrapper for `SSL`.
+class DtlsClientConnection2 {
+  // Status states
+  static const int handshakeStatus = 201;
+  static const int connectedStatus = 202;
+  static const int closedStatus = 203;
+
+  // Buffer identifiers.
+  // These must agree with those in the native C++ implementation.
+  static const int readPlaintextId = 0;
+  static const int writePlaintextId = 1;
+  static const int readEncryptedId = 2;
+  static const int writeEncryptedId = 3;
+  static const int bufferCount = 4;
+
+  int _status = handshakeStatus;
+  bool _socketClosedRead = false; // The network socket is closed for reading.
+  bool _socketClosedWrite = false; // The network socket is closed for writing.
+
+  // static const _bufferSize = (1 << 16); // sizeOf<timeval>() must fit in
+  // static final Pointer<Uint8> _buffer = malloc.call<Uint8>(_bufferSize);
+  // Pointer<SSL> _ssl;
+  // Pointer<BIO> _rbio = lib.BIO_new(lib.BIO_s_mem());
+  // Pointer<BIO> _wbio = lib.BIO_new(lib.BIO_s_mem());
+
+  _SecureFilter? _secureFilter = new _SecureFilter._();
+
+  final _controller = new StreamController<RawSocketEvent>(sync: true);
+
+  final _outgoing = StreamController<Uint8List>();
+  Stream<Uint8List> get outgoing => _outgoing.stream;
+
+  final _received = StreamController<Uint8List>();
+  Stream<Uint8List> get received => _received.stream;
+
+  final _connected = Completer<void>();
+
+  Timer? _timer;
+
+  final RawDatagramSocket _socket;
+
+  /// Create a [DtlsClientConnection] using a [DtlsClientContext].
+  /// The [hostname] is used for Server Name Indication
+  /// and to verify the certificate.
+  DtlsClientConnection(this._socket,
+      {SecurityContext? context, required String hostname}) {
+    final secureFilter = _secureFilter!;
+    secureFilter.init();
+
+    // lib.SSL_set_bio(_ssl, _rbio, _wbio);
+    // lib.BIO_ctrl(_rbio, BIO_C_SET_BUF_MEM_EOF_RETURN, -1, nullptr);
+    // lib.BIO_ctrl(_wbio, BIO_C_SET_BUF_MEM_EOF_RETURN, -1, nullptr);
+
+    _socket.listen((event) {
+      if (event == RawSocketEvent.read) {
+        final datagram = _socket.receive();
+        if (datagram == null) {
+          return;
+        }
+        final data = datagram.data;
+        final buffer = secureFilter.buffers![readEncryptedId];
+        buffer.write(data, 0, data.length);
+      }
+    });
+
+    secureFilter.dtlsConnect(
+        hostname,
+        context ?? SecurityContext.defaultContext,
+        false,
+        false,
+        false,
+        Uint8List.fromList([])
+        // requestClientCertificate || requireClientCertificate,
+        // requireClientCertificate,
+        // encodedProtocols
+        );
+
+    // if (hostname != null) {
+    //   final hostnameStr = hostname.toNativeUtf8();
+    //   lib.X509_VERIFY_PARAM_set1_host(
+    //       lib.SSL_get0_param(_ssl), hostnameStr.cast(), 0);
+    //   lib.SSL_ctrl(_ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME,
+    //       TLSEXT_NAMETYPE_host_name, hostnameStr.cast());
+    //   malloc.free(hostnameStr);
+    // }
+  }
+
+  void _eventDispatcher(RawSocketEvent event) {
+    try {
+      if (event == RawSocketEvent.read) {
+        _readHandler();
+      } else if (event == RawSocketEvent.write) {
+        _writeHandler();
+      } else if (event == RawSocketEvent.readClosed) {
+        _closeHandler();
+      }
+    } catch (e, stackTrace) {
+      _reportError(e, stackTrace);
+    }
+  }
+
+  void _writeSocket(InternetAddress address, int port) {
+    if (_socketClosedWrite) return;
+    var buffer = _secureFilter!.buffers![writeEncryptedId];
+    if (buffer.readToDatagramSocket(_socket, address, port)) {
+      // Returns true if blocked
+      _socket.writeEventsEnabled = true;
+    }
+  }
+
+  void _reportError(e, [StackTrace? stackTrace]) {
+    if (_status == closedStatus) {
+      return;
+    }
+    // else if (_connectPending) {
+    //   // _connectPending is true until the handshake has completed, and the
+    //   // _handshakeComplete future returned from SecureSocket.connect has
+    //   // completed.  Before this point, we must complete it with an error.
+    //   _handshakeComplete.completeError(e, stackTrace);
+    // } else {
+    //   _controller.addError(e, stackTrace);
+    // }
+    // _close();
+  }
+
+  Future<void> _secureHandshake(InternetAddress address, int port) async {
+    try {
+      bool needRetryHandshake = await _secureFilter!.handshake();
+      if (needRetryHandshake) {
+        // Some certificates have been evaluated, need to retry handshake.
+        await _secureHandshake(address, port);
+      } else {
+        // _filterStatus.writeEmpty = false;
+        // _readSocket();
+        _writeSocket(address, port);
+        await _scheduleFilter();
+      }
+    } catch (e, stackTrace) {
+      _reportError(e, stackTrace);
+    }
+  }
+
+  // void _handleError(int ret, void Function(Exception) errorHandler) {
+  //   var buffer = _secureFilter!.
+  //   final code = lib.SSL_get_error(_ssl, ret);
+  //   if (code == SSL_ERROR_SSL) {
+  //     errorHandler(TlsException(
+  //         lib.ERR_error_string(lib.ERR_get_error(), nullptr)
+  //             .cast<Utf8>()
+  //             .toDartString()));
+  //   } else if (code == SSL_ERROR_ZERO_RETURN) {
+  //     _received.close();
+  //   }
+  // }
+
+  Future<void> _scheduleFilter() {
+    // _filterPending = true;
+    // return _tryFilter();
+  }
+
+  // void incoming(Uint8List input) {
+  //   _buffer.asTypedList(_bufferSize).setAll(0, input);
+  //   lib.BIO_write(_rbio, _buffer.cast(), input.length);
+  //   _maintainState();
+  // }
+
+  // void _maintainState() {
+  //   if (_connected.isCompleted) {
+  //     final ret = lib.SSL_read(_ssl, _buffer.cast(), _bufferSize);
+  //     if (ret > 0) {
+  //       _received.add(Uint8List.fromList(_buffer.asTypedList(ret)));
+  //       _maintainOutgoing();
+  //     } else {
+  //       _maintainOutgoing();
+  //       // _handleError(ret, _received.addError);
+  //     }
+  //   } else {
+  //     _connect();
+  //   }
+  // }
+
+  void send(Uint8List data) {
+    _buffer.asTypedList(_bufferSize).setAll(0, data);
+    final ret = lib.SSL_write(_ssl, _buffer.cast(), data.length);
+    _maintainOutgoing();
+    if (ret < 0) {
+      _handleError(ret, (e) => throw e);
+    }
+  }
+
+  void _connect() {
+    // final ret = lib.SSL_connect(_ssl);
+    _maintainOutgoing();
+    // if (ret == 1) {
+    //   _connected.complete();
+    // } else if (ret == 0) {
+    //   _connected.completeError(TlsException('handshake shut down'));
+    // } else {
+    //   // _handleError(ret, _connected.completeError);
+    // }
+  }
+
+  Future<void> connect() {
+    if (!_connected.isCompleted) {
+      _connect();
+    }
+    return _connected.future;
+  }
+
+  void _maintainOutgoing() {
+    final ret = lib.BIO_read(_wbio, _buffer.cast(), _bufferSize);
+    if (ret > 0) {
+      _outgoing.add(Uint8List.fromList(_buffer.asTypedList(ret)));
+    }
+    _timer?.cancel();
+    if (lib.SSL_ctrl(_ssl, DTLS_CTRL_GET_TIMEOUT, 0, _buffer.cast()) > 0) {
+      _timer = Timer(_buffer.cast<timeval>().ref.duration, _maintainState);
+    }
+  }
+}
+
 /// A TCP socket using TLS and SSL.
 ///
 /// A secure socket may be used as either a [Stream] or an [IOSink].
@@ -1324,12 +1585,32 @@ class _ExternalBuffer {
       }
     }
   }
+
+  bool readToDatagramSocket(
+      RawDatagramSocket socket, InternetAddress address, int port) {
+    if (linearLength == 0) {
+      return false;
+    }
+    final payload = data!.sublist(start, start + linearLength);
+    int bytes = socket.send(payload, address, port);
+    if (bytes == 0) {
+      return false;
+    }
+    return true;
+  }
 }
 
 abstract class _SecureFilter {
   external factory _SecureFilter._();
 
   void connect(
+      String hostName,
+      SecurityContext context,
+      bool isServer,
+      bool requestClientCertificate,
+      bool requireClientCertificate,
+      Uint8List protocols);
+  void dtlsConnect(
       String hostName,
       SecurityContext context,
       bool isServer,
