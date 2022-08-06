@@ -41,6 +41,7 @@ class SSLCertContext : public ReferenceCounted<SSLCertContext> {
 
   static int CertificateCallback(int preverify_ok, X509_STORE_CTX* store_ctx);
   static void KeyLogCallback(const SSL* ssl, const char* line);
+  static void ClientPskCallback(const SSL* ssl, SSL_psk_client_cb_func cb);
 
   static SSLCertContext* GetSecurityContext(Dart_NativeArguments args);
   static const char* GetPasswordArgument(Dart_NativeArguments args,

@@ -92,6 +92,10 @@ void SSLCertContext::KeyLogCallback(const SSL* ssl, const char* line) {
   }
 }
 
+static void ClientPskCallback(const SSL* ssl, SSL_psk_client_cb_func cb) {
+  SSL_set_psk_client_callback(ssl, cb);
+}
+
 SSLCertContext* SSLCertContext::GetSecurityContext(Dart_NativeArguments args) {
   SSLCertContext* context;
   Dart_Handle dart_this = ThrowIfError(Dart_GetNativeArgument(args, 0));
